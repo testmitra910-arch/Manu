@@ -1,4 +1,4 @@
-name: Build Test Mitra APK
+name: Build TEST MITRA APK
 
 on:
   workflow_dispatch:
@@ -8,16 +8,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
-      - name: Find and extract ZIP
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Find ZIP
         shell: bash
         run: |
           set -e
@@ -25,63 +31,111 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP file not found"
+            echo "ERROR: ZIP file not found."
             exit 1
           fi
 
-          echo "Using ZIP: $ZIP_FILE"
+          echo "ZIP found: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
 
-          rm -rf android-project
-          mkdir -p android-project
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -e
 
-          unzip -q "$ZIP_FILE" -d android-project
+          rm -rf /tmp/testmitra
+          mkdir -p /tmp/testmitra
 
-          echo "Extracted files:"
-          find android-project -maxdepth 3 -type f | head -100
+          unzip -o "$ZIP_FILE" -d /tmp/testmitra
+
+          echo "ZIP extracted successfully."
 
       - name: Locate Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
-            -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-            -printf '%h\n' | head -n 1)
+          SETTINGS_FILE=$(find /tmp/testmitra \
+            -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            | head -n 1)
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found"
-            find android-project -maxdepth 5 -type f
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: Android settings file not found."
+            find /tmp/testmitra -maxdepth 5 -type f
             exit 1
           fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "Android project:"
           echo "$PROJECT_DIR"
 
-      - name: Verify Android project
+      - name: Create Supabase environment
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -e
+
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "ERROR: SUPABASE_URL secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "ERROR: SUPABASE_ANON_KEY secret is missing."
+            exit 1
+          fi
+
+          printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" \
+            > "$PROJECT_DIR/.env"
+
+          printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY" \
+            >> "$PROJECT_DIR/.env"
+
+          echo "Supabase environment created."
+
+      - name: Add Internet permission
+        shell: bash
+        run: |
+          set -e
+
+          MANIFEST="$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          if [ -f "$MANIFEST" ]; then
+
+            if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+
+              sed -i \
+                '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET" />' \
+                "$MANIFEST"
+
+            fi
+
+          else
+            echo "ERROR: AndroidManifest.xml not found."
+            exit 1
+          fi
+
+      - name: Check Gradle wrapper
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          else
-            echo "ERROR: gradlew not found"
-            ls -la
+          if [ ! -f "./gradlew" ]; then
+            echo "ERROR: gradlew not found."
             exit 1
           fi
 
-          if [ -f "settings.gradle.kts" ]; then
-            echo "settings.gradle.kts found"
-          elif [ -f "settings.gradle" ]; then
-            echo "settings.gradle found"
-          else
-            echo "ERROR: settings.gradle not found"
-            exit 1
-          fi
+          chmod +x ./gradlew
+
+          echo "Gradle wrapper ready."
 
       - name: Build Debug APK
         shell: bash
@@ -90,7 +144,9 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          ./gradlew assembleDebug \
+          ./gradlew \
+            clean \
+            assembleDebug \
             --no-daemon \
             --stacktrace
 
@@ -99,27 +155,25 @@ jobs:
         run: |
           set -e
 
-          echo "Searching for APK..."
-
           APK=$(find "$PROJECT_DIR" \
             -type f \
-            -path "*/build/outputs/apk/*.apk" \
+            -path "*/build/outputs/apk/debug/*.apk" \
             | head -n 1)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: APK not found"
-            find "$PROJECT_DIR" -type f -name "*.apk"
+            echo "ERROR: Debug APK was not generated."
             exit 1
           fi
 
-          echo "APK found:"
+          echo "APK FOUND:"
           echo "$APK"
 
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-      - name: Upload APK
+      - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
-          name: Test-Mitra-APK
+          name: TEST-MITRA-APK
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
+          retention-days: 30
