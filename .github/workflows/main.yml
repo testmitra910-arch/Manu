@@ -1,4 +1,4 @@
-name: Build TEST MITRA APK
+name: Build TEST MITRA APk
 
 on:
   workflow_dispatch:
