@@ -2,42 +2,63 @@ name: Build TEST MITRA APK
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+
+    env:
+      ZIP_FILE: test-mitra.zip
+      JAVA_VERSION: "17"
+      GRADLE_VERSION: "9.3.1"
 
     steps:
 
+      # --------------------------------------------------
+      # 1. Checkout repository
+      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
 
-      - name: Setup Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.3.1"
-
-      - name: Find ZIP
+      # --------------------------------------------------
+      # 2. Find ZIP file
+      # --------------------------------------------------
+      - name: Find ZIP file
         shell: bash
         run: |
           set -e
 
-          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
+          echo "Files in repository:"
+          find . -maxdepth 3 -type f | sort | head -200
 
-          if [ -z "$ZIP_FILE" ]; then
+          ZIP_PATH=""
+
+          if [ -f "./${ZIP_FILE}" ]; then
+            ZIP_PATH="./${ZIP_FILE}"
+          else
+            ZIP_PATH=$(find . -maxdepth 3 -type f \
+              \( -name "*.zip" -o -name "*.ZIP" \) \
+              | head -1 || true)
+          fi
+
+          if [ -z "$ZIP_PATH" ]; then
             echo "ERROR: ZIP file not found."
             exit 1
           fi
 
-          echo "ZIP found: $ZIP_FILE"
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+          echo "ZIP found: $ZIP_PATH"
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
 
+
+      # --------------------------------------------------
+      # 3. Extract ZIP
+      # --------------------------------------------------
       - name: Extract ZIP
         shell: bash
         run: |
@@ -46,33 +67,97 @@ jobs:
           rm -rf /tmp/testmitra
           mkdir -p /tmp/testmitra
 
-          unzip -o "$ZIP_FILE" -d /tmp/testmitra
+          unzip -q "$ZIP_PATH" -d /tmp/testmitra
 
           echo "ZIP extracted successfully."
+          find /tmp/testmitra -maxdepth 4 -type f | sort | head -300
 
+
+      # --------------------------------------------------
+      # 4. Locate Android project
+      # --------------------------------------------------
       - name: Locate Android project
         shell: bash
         run: |
           set -e
 
-          SETTINGS_FILE=$(find /tmp/testmitra \
-            -type f \
-            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
-            | head -n 1)
+          PROJECT_DIR=""
 
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android settings file not found."
-            find /tmp/testmitra -maxdepth 5 -type f
+          # Look for settings.gradle.kts
+          SETTINGS_KTS=$(find /tmp/testmitra -type f \
+            -name "settings.gradle.kts" \
+            | head -1 || true)
+
+          # Look for settings.gradle
+          SETTINGS_GRADLE=$(find /tmp/testmitra -type f \
+            -name "settings.gradle" \
+            | head -1 || true)
+
+          if [ -n "$SETTINGS_KTS" ]; then
+            PROJECT_DIR=$(dirname "$SETTINGS_KTS")
+          elif [ -n "$SETTINGS_GRADLE" ]; then
+            PROJECT_DIR=$(dirname "$SETTINGS_GRADLE")
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found."
+            echo "Searching for Gradle files..."
+            find /tmp/testmitra -type f \
+              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+              -print
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
+          echo ""
+          echo "Project files:"
+          find "$PROJECT_DIR" -maxdepth 3 -type f | sort | head -300
 
+
+      # --------------------------------------------------
+      # 5. Setup Java 17
+      # --------------------------------------------------
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+
+      # --------------------------------------------------
+      # 6. Setup Gradle 9.3.1
+      # --------------------------------------------------
+      - name: Setup Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
+
+
+      # --------------------------------------------------
+      # 7. Create local.properties
+      # --------------------------------------------------
+      - name: Create local.properties
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          cat > local.properties <<EOF
+          sdk.dir=$ANDROID_HOME
+          EOF
+
+          echo "local.properties created."
+
+
+      # --------------------------------------------------
+      # 8. Create Supabase environment
+      # --------------------------------------------------
       - name: Create Supabase environment
         shell: bash
         env:
@@ -81,62 +166,93 @@ jobs:
         run: |
           set -e
 
-          if [ -z "$SUPABASE_URL" ]; then
-            echo "ERROR: SUPABASE_URL secret is missing."
-            exit 1
-          fi
+          echo "Creating Supabase environment..."
 
-          if [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "ERROR: SUPABASE_ANON_KEY secret is missing."
-            exit 1
-          fi
+          mkdir -p "$PROJECT_DIR"
 
-          printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL" \
-            > "$PROJECT_DIR/.env"
-
-          printf 'SUPABASE_ANON_KEY=%s\n' "$SUPABASE_ANON_KEY" \
-            >> "$PROJECT_DIR/.env"
+          cat > "$PROJECT_DIR/.env" <<EOF
+          SUPABASE_URL=$SUPABASE_URL
+          SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY
+          EOF
 
           echo "Supabase environment created."
 
+
+      # --------------------------------------------------
+      # 9. Add Internet permission
+      # --------------------------------------------------
       - name: Add Internet permission
         shell: bash
         run: |
           set -e
 
-          MANIFEST="$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          MANIFEST=$(find "$PROJECT_DIR" -type f \
+            -path "*/src/main/AndroidManifest.xml" \
+            | head -1 || true)
 
-          if [ -f "$MANIFEST" ]; then
-
-            if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
-
-              sed -i \
-                '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET" />' \
-                "$MANIFEST"
-
-            fi
-
-          else
-            echo "ERROR: AndroidManifest.xml not found."
+          if [ -z "$MANIFEST" ]; then
+            echo "AndroidManifest.xml not found."
             exit 1
           fi
 
-      - name: Check Gradle wrapper
+          echo "Manifest:"
+          echo "$MANIFEST"
+
+          if grep -q \
+            'android.permission.INTERNET' \
+            "$MANIFEST"; then
+
+            echo "Internet permission already exists."
+
+          else
+
+            sed -i \
+              's#<manifest #<manifest #g' \
+              "$MANIFEST"
+
+            sed -i \
+              's#</manifest>#    <uses-permission android:name="android.permission.INTERNET" />\n</manifest>#' \
+              "$MANIFEST"
+
+            echo "Internet permission added."
+
+          fi
+
+
+      # --------------------------------------------------
+      # 10. Show Gradle information
+      # --------------------------------------------------
+      - name: Check Gradle
+        shell: bash
+        run: |
+          set -e
+
+          echo "Gradle version:"
+          gradle --version
+
+          echo ""
+          echo "Java version:"
+          java -version
+
+
+      # --------------------------------------------------
+      # 11. Clean project
+      # --------------------------------------------------
+      - name: Clean Android project
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          if [ ! -f "./gradlew" ]; then
-            echo "ERROR: gradlew not found."
-            exit 1
-          fi
+          gradle clean \
+            --no-daemon \
+            --stacktrace
 
-          chmod +x ./gradlew
 
-          echo "Gradle wrapper ready."
-
+      # --------------------------------------------------
+      # 12. Build Debug APK
+      # --------------------------------------------------
       - name: Build Debug APK
         shell: bash
         run: |
@@ -144,36 +260,82 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          ./gradlew \
-            clean \
-            assembleDebug \
-            --no-daemon \
-            --stacktrace
+          echo "Building TEST MITRA APK..."
 
+          gradle assembleDebug \
+            --no-daemon \
+            --stacktrace \
+            --info
+
+
+      # --------------------------------------------------
+      # 13. Find APK
+      # --------------------------------------------------
       - name: Find APK
         shell: bash
         run: |
           set -e
 
+          echo "Searching for APK..."
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print
+
           APK=$(find "$PROJECT_DIR" \
             -type f \
-            -path "*/build/outputs/apk/debug/*.apk" \
-            | head -n 1)
+            -name "*-debug.apk" \
+            | head -1 || true)
 
           if [ -z "$APK" ]; then
-            echo "ERROR: Debug APK was not generated."
+            APK=$(find "$PROJECT_DIR" \
+              -type f \
+              -name "*.apk" \
+              | head -1 || true)
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
             exit 1
           fi
 
-          echo "APK FOUND:"
+          echo "APK found:"
           echo "$APK"
 
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          mkdir -p "$GITHUB_WORKSPACE/apk"
 
+          cp "$APK" \
+            "$GITHUB_WORKSPACE/apk/TEST-MITRA.apk"
+
+          echo "APK copied successfully."
+
+
+      # --------------------------------------------------
+      # 14. Upload TEST MITRA APK
+      # --------------------------------------------------
       - name: Upload TEST MITRA APK
         uses: actions/upload-artifact@v4
         with:
           name: TEST-MITRA-APK
-          path: ${{ env.APK_PATH }}
+          path: apk/TEST-MITRA.apk
           if-no-files-found: error
-          retention-days: 30
+
+
+      # --------------------------------------------------
+      # 15. Build summary
+      # --------------------------------------------------
+      - name: Build Summary
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "       TEST MITRA APK BUILD DONE"
+          echo "======================================"
+          echo ""
+          echo "APK:"
+          ls -lh apk/TEST-MITRA.apk
+          echo ""
+          echo "Artifact name:"
+          echo "TEST-MITRA-APK"
+          echo ""
+          echo "Download the APK from the Actions run."
