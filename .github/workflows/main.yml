@@ -1,0 +1,125 @@
+name: Build Test Mitra APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Find and extract ZIP
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP file not found"
+            exit 1
+          fi
+
+          echo "Using ZIP: $ZIP_FILE"
+
+          rm -rf android-project
+          mkdir -p android-project
+
+          unzip -q "$ZIP_FILE" -d android-project
+
+          echo "Extracted files:"
+          find android-project -maxdepth 3 -type f | head -100
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/android-project" \
+            -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -printf '%h\n' | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found"
+            find android-project -maxdepth 5 -type f
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Android project:"
+          echo "$PROJECT_DIR"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          else
+            echo "ERROR: gradlew not found"
+            ls -la
+            exit 1
+          fi
+
+          if [ -f "settings.gradle.kts" ]; then
+            echo "settings.gradle.kts found"
+          elif [ -f "settings.gradle" ]; then
+            echo "settings.gradle found"
+          else
+            echo "ERROR: settings.gradle not found"
+            exit 1
+          fi
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "Searching for APK..."
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/*.apk" \
+            | head -n 1)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK not found"
+            find "$PROJECT_DIR" -type f -name "*.apk"
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Test-Mitra-APK
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
